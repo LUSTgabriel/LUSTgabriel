@@ -1,0 +1,92 @@
+name: Update contribution snake
+
+on:
+  schedule:
+    - cron: '23 0 * * *'
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/snake.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: contribution-snake
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Generate light and dark SVGs
+        uses: Platane/snk/svg-only@d8f6715049803e982ee5ff501b6b9b7d5deeb09b # v3
+        with:
+          github_user_name: ${{ github.repository_owner }}
+          outputs: |
+            dist/github-contribution-grid-snake.svg
+            dist/github-contribution-grid-snake-dark.svg?palette=github-dark
+
+      - name: Publish SVGs to output branch
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const fs = require('node:fs/promises');
+            const repo = context.repo;
+            const ref = 'heads/output';
+            const files = [
+              'github-contribution-grid-snake.svg',
+              'github-contribution-grid-snake-dark.svg'
+            ];
+            const tree = await Promise.all(files.map(async (path) => {
+              const content = await fs.readFile('dist/' + path, 'utf8');
+              if (!content.includes('<svg')) {
+                throw new Error('Invalid SVG: ' + path);
+              }
+              return { path, mode: '100644', type: 'blob', content };
+            }));
+
+            let parent;
+            try {
+              const result = await github.rest.git.getRef({ ...repo, ref });
+              parent = result.data.object.sha;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+
+            let previousTree;
+            if (parent) {
+              const result = await github.rest.git.getCommit({
+                ...repo, commit_sha: parent
+              });
+              previousTree = result.data.tree.sha;
+            }
+
+            const result = await github.rest.git.createTree({
+              ...repo,
+              ...(previousTree ? { base_tree: previousTree } : {}),
+              tree
+            });
+            if (result.data.sha === previousTree) {
+              core.info('Contribution snake is already up to date.');
+              return;
+            }
+
+            const commit = await github.rest.git.createCommit({
+              ...repo,
+              message: 'Update contribution snake',
+              tree: result.data.sha,
+              parents: parent ? [parent] : []
+            });
+            if (parent) {
+              await github.rest.git.updateRef({
+                ...repo, ref, sha: commit.data.sha, force: false
+              });
+            } else {
+              await github.rest.git.createRef({
+                ...repo, ref: 'refs/' + ref, sha: commit.data.sha
+              });
+            }
